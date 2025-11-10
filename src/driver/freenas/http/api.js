@@ -325,7 +325,7 @@ class Api {
   getPropertiesKeyValueArray(properties) {
     let arr = [];
     for (const property in properties) {
-      arr.push({ key: property, value: properties[property] });
+      arr.push({ key: property, value: String(properties[property]) });
     }
 
     return arr;
