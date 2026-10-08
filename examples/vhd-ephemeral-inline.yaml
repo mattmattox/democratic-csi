@@ -1,0 +1,3 @@
+driver: vhd-ephemeral-inline
+vhd:
+  nameTemplate: "csi-ephemeral-inline-{{ volume_id }}"

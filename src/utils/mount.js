@@ -10,7 +10,17 @@ const FINDMNT_COMMON_OPTIONS = [
   "--nofsroot", // prevents unwanted behavior with cifs volumes
 ];
 
-const DEFAULT_TIMEOUT = process.env.MOUNT_DEFAULT_TIMEOUT || 30000;
+let DEFAULT_TIMEOUT = 30 * 1000;
+
+if (process.env.MOUNT_DEFAULT_TIMEOUT) {
+  if (/^\d+$/.test(process.env.MOUNT_DEFAULT_TIMEOUT)) {
+    DEFAULT_TIMEOUT = parseInt(process.env.MOUNT_DEFAULT_TIMEOUT);
+  } else {
+    console.log(
+      "invalid MOUNT_DEFAULT_TIMEOUT set: " + process.env.MOUNT_DEFAULT_TIMEOUT
+    );
+  }
+}
 
 class Mount {
   constructor(options = {}) {
@@ -82,6 +92,37 @@ class Mount {
     }
 
     return true;
+  }
+
+  /**
+   * findmnt --source <device> --output source,target,fstype,label,options,avail,size,used -b -J
+   *
+   * @param {*} device
+   */
+  async getDeviceMounts(device) {
+    const mount = this;
+    const filesystem = await mount.getFilesystemInstance();
+    if (device.startsWith("/")) {
+      device = await filesystem.realpath(device);
+    }
+
+    let args = [];
+    args = args.concat(["--source", device]);
+    args = args.concat(FINDMNT_COMMON_OPTIONS);
+    let result;
+
+    try {
+      result = await mount.exec(mount.options.paths.findmnt, args);
+    } catch (err) {
+      // no results
+      if (err.code == 1) {
+        return { filesystems: [] };
+      } else {
+        throw err;
+      }
+    }
+
+    return JSON.parse(result.stdout);
   }
 
   /**
@@ -387,7 +428,7 @@ class Mount {
 
   exec(command, args, options = {}) {
     if (!options.hasOwnProperty("timeout")) {
-      options.timeout = DEFAULT_TIMEOUT;
+      options.timeout = parseInt(DEFAULT_TIMEOUT) || 30 * 1000;
     }
 
     const mount = this;

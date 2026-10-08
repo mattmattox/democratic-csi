@@ -1,0 +1,29 @@
+kind: Pod
+apiVersion: v1
+metadata:
+  name: some-oci-pod
+spec:
+  nodeName: node01
+  containers:
+    - name: hello
+      image: busybox:1.37
+      command: ["sh", "-c", 'echo "Hello, Kubernetes!" && sleep Infinity']
+      resources:
+        requests:
+          memory: "128Mi"
+          cpu: "500m"
+        limits:
+          memory: "128Mi"
+          cpu: "500m"
+      volumeMounts:
+        - name: oci
+          mountPath: /mnt/oci
+  volumes:
+    - name: oci
+      csi:
+        driver: org.democratic-csi.containerd-oci-inline-ephemeral
+        volumeAttributes:
+          "image.reference": "ubuntu:24.04"
+          # "image.platform": ""
+          # "image.pullPolicy": "Always",
+          # "snapshot.label.containerd.io/snapshot/windows/rootfs.sizebytes": "107374182400"

@@ -1,3 +1,24 @@
+# v1.9.5
+
+Released 2026-01-07
+
+- better support for nixos
+- support SCALE-25.04
+- support SCALE-25.10
+- improved nvmeof support
+- added `pcs` share strategy for `zfs-generic-iscsi` (see PR #464)
+- added `freenas-nvmeof` and `freenas-api-nvmeof` driver to use the new nmveof features of TrueNAS 25.10+
+- support for ENV vars in the configuration yaml `${FOO}` will expand
+- improved docker images
+- bumped deps and bundled binaries
+- support csi versions `v1.10.0` and `v1.11.0`
+- new `containerd-oci-ephemeral-inline` driver
+- new `vhd-ephemeral-inline` driver
+- bump `objectivefs` binary to `7.3`
+- possible to set `snapshotProperties` on zfs snapshot just like `datasetProperties`
+- limit container images to amd64 and arm64 for now
+- improve concurrency logic in the `zf-generic-foo` drivers (see #504)
+
 # v1.9.4
 
 Release 2024-07-06

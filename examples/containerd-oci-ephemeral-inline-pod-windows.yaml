@@ -1,0 +1,37 @@
+kind: Pod
+apiVersion: v1
+metadata:
+  name: some-oci-pod-windows
+spec:
+  nodeSelector:
+    kubernetes.io/os: windows
+  containers:
+    - name: hello
+      image: mcr.microsoft.com/windows/servercore:ltsc2022
+      command:
+        - powershell.exe
+        - -command
+        - while ($true) { Start-Sleep -Seconds 1 }
+      resources:
+        requests:
+          memory: "128Mi"
+          cpu: "500m"
+        limits:
+          memory: "128Mi"
+          cpu: "500m"
+      volumeMounts:
+        - name: oci
+          mountPath: /mnt/oci
+  volumes:
+    - name: oci
+      csi:
+        driver: org.democratic-csi.containerd-oci-inline-ephemeral
+        volumeAttributes:
+          # "image.reference": "ubuntu:24.04"
+          "image.reference": "democraticcsi/csi-grpc-proxy"
+          # NOTE: windows is incapable of using linux-based platform images
+          # windows/amd64
+          # NOTE: linux seemingly can mount windows-based images however
+          # "image.platform": "linux/amd64"
+          # "image.pullPolicy": "Always",
+          "snapshot.label.containerd.io/snapshot/windows/rootfs.sizebytes": "107374182400"

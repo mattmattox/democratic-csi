@@ -19,9 +19,11 @@ have access to resizing, snapshots, clones, etc functionality.
   - `freenas-nfs` (manages zfs datasets to share over nfs)
   - `freenas-iscsi` (manages zfs zvols to share over iscsi)
   - `freenas-smb` (manages zfs datasets to share over smb)
+  - `freenas-nvmeof` (manages zfs zvols to share over nvmeof)
   - `freenas-api-nfs` experimental use with SCALE only (manages zfs datasets to share over nfs)
   - `freenas-api-iscsi` experimental use with SCALE only (manages zfs zvols to share over iscsi)
   - `freenas-api-smb` experimental use with SCALE only (manages zfs datasets to share over smb)
+  - `freenas-api-nvmeof` experimental use with SCALE only (manages zfs zvols to share over nvmeof)
   - `zfs-generic-nfs` (works with any ZoL installation...ie: Ubuntu)
   - `zfs-generic-iscsi` (works with any ZoL installation...ie: Ubuntu)
   - `zfs-generic-smb` (works with any ZoL installation...ie: Ubuntu)
@@ -41,6 +43,8 @@ have access to resizing, snapshots, clones, etc functionality.
   - `node-manual` (allows connecting to manually created smb, nfs, lustre,
     oneclient, nvmeof, and iscsi volumes, see sample PVs in the `examples`
     directory)
+  - `containerd-oci-ephemeral-inline` (provisions ephemeral rw node-local storage using oci images as a base)
+  - `vhd-ephemeral-inline` (provisions ephemeral rw node-local storage using vhd images as a base)
 - framework for developing `csi` drivers
 
 If you have any interest in providing a `csi` driver, simply open an issue to
@@ -58,6 +62,8 @@ Predominantly 3 things are needed:
 
 ## Community Guides
 
+Join us in the Home Operations discord server in #democratic-csi
+
 - https://jonathangazeley.com/2021/01/05/using-truenas-to-provide-persistent-storage-for-kubernetes/
 - https://www.lisenet.com/2021/moving-to-truenas-and-democratic-csi-for-kubernetes-persistent-storage/
 - https://gist.github.com/admun/4372899f20421a947b7544e5fc9f9117 (migrating
@@ -65,6 +71,7 @@ Predominantly 3 things are needed:
 - https://gist.github.com/deefdragon/d58a4210622ff64088bd62a5d8a4e8cc
   (migrating between storage classes using `velero`)
 - https://github.com/fenio/k8s-truenas (NFS/iSCSI over API with TrueNAS Scale)
+- https://wazaari.dev/blog/truenas-talos-democratic-csi
 
 ## Node Prep
 
@@ -182,7 +189,7 @@ node:
         value: nsenter
       - name: ISCSIADM_HOST_PATH
         value: /usr/local/sbin/iscsiadm
-    iscsiDirHostPath: /usr/local/etc/iscsi
+    iscsiDirHostPath: /var/iscsi
     iscsiDirHostPathType: ""
 ```
 
@@ -328,7 +335,7 @@ Set-MSDSMGlobalLoadBalancePolicy -Policy RR
 
 Server preparation depends slightly on which `driver` you are using.
 
-### FreeNAS (freenas-nfs, freenas-iscsi, freenas-smb, freenas-api-nfs, freenas-api-iscsi, freenas-api-smb)
+### FreeNAS (freenas-nfs, freenas-iscsi, freenas-smb, freenas-nvmeof, freenas-api-nfs, freenas-api-iscsi, freenas-api-smb, freenas-api-nvmeof)
 
 The recommended version of FreeNAS is 12.0-U2+, however the driver should work
 with much older versions as well.
@@ -371,6 +378,8 @@ Ensure the following services are configurged and running:
     Be sure to properly adjust both [tunables](https://www.freebsd.org/cgi/man.cgi?query=ctl&sektion=4#end) `kern.cam.ctl.max_ports` and `kern.cam.ctl.max_luns` to avoid running out of resources when dynamically provisioning iSCSI volumes on FreeNAS or TrueNAS Core.
 
 - smb
+- nvmeof
+  - ensure you have at least 1 listener/port configured (typcially TCP port 4420)
 
 If you would prefer you can configure `democratic-csi` to use a
 non-`root` user when connecting to the FreeNAS server:
@@ -464,6 +473,7 @@ passwd smbroot (optional)
 smbpasswd -L -a smbroot
 
 ####### nvmeof
+# apt-get install linux-modules-extra-$(uname -r)
 # ensure nvmeof target modules are loaded at startup
 cat <<EOF > /etc/modules-load.d/nvmet.conf
 nvmet
@@ -484,7 +494,8 @@ cd nvmetcli
 
 ## install globally
 python3 setup.py install --prefix=/usr
-pip install configshell_fb
+pip install configshell_fb # apt-get install -y pip python3-configshell-fb
+
 
 ## install to root home dir
 python3 setup.py install --user

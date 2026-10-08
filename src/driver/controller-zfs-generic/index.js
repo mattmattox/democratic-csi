@@ -4,6 +4,7 @@ const { GrpcError, grpc } = require("../../utils/grpc");
 const GeneralUtils = require("../../utils/general");
 const LocalCliExecClient =
   require("../../utils/zfs_local_exec_client").LocalCliClient;
+const Mutex = require("async-mutex").Mutex;
 const SshClient = require("../../utils/zfs_ssh_exec_client").SshClient;
 const { Zetabyte, ZfsSshProcessManager } = require("../../utils/zfs");
 
@@ -13,6 +14,15 @@ const ISCSI_ASSETS_NAME_PROPERTY_NAME = "democratic-csi:iscsi_assets_name";
 const NVMEOF_ASSETS_NAME_PROPERTY_NAME = "democratic-csi:nvmeof_assets_name";
 const __REGISTRY_NS__ = "ControllerZfsGenericDriver";
 class ControllerZfsGenericDriver extends ControllerZfsBaseDriver {
+  constructor(ctx, options) {
+    super(...arguments);
+
+    this.targetCliMutex = new Mutex();
+    this.nvmetCliMutex = new Mutex();
+    this.spdkCliMutex = new Mutex();
+    this.pcsMutex = new Mutex();
+  }
+
   getExecClient() {
     return this.ctx.registry.get(`${__REGISTRY_NS__}:exec_client`, () => {
       if (this.options.sshConnection) {
@@ -38,20 +48,17 @@ class ControllerZfsGenericDriver extends ControllerZfsBaseDriver {
         options.executor = execClient;
       }
       options.idempotent = true;
-
-      if (
-        this.options.zfs.hasOwnProperty("cli") &&
-        this.options.zfs.cli &&
-        this.options.zfs.cli.hasOwnProperty("paths")
-      ) {
-        options.paths = this.options.zfs.cli.paths;
-      }
-
       options.sudo = _.get(this.options, "zfs.cli.sudoEnabled", false);
-
       if (typeof this.setZetabyteCustomOptions === "function") {
         await this.setZetabyteCustomOptions(options);
       }
+
+      options.paths = options.paths || {};
+      options.paths = Object.assign(
+        {},
+        options.paths,
+        _.get(this.options, "zfs.cli.paths", {})
+      );
 
       return new Zetabyte(options);
     });
@@ -70,7 +77,7 @@ class ControllerZfsGenericDriver extends ControllerZfsBaseDriver {
       case "zfs-generic-nvmeof":
         return "volume";
       default:
-        throw new Error("unknown driver: " + this.ctx.args.driver);
+        throw new Error("unknown driver: " + this.options.driver);
     }
   }
 
@@ -297,8 +304,66 @@ create /backstores/block/${assetName}
               }
             );
             break;
+          case "pcs":
+              basename = this.options.iscsi.shareStrategyPcs.basename;
+              let pcs_group = this.options.iscsi.shareStrategyPcs.pcs_group;
+
+              let extraTerms = ['group', `${pcs_group}`, '--wait']; // The wait is important to avoid race conditions
+              let createTargetTerms = [
+                'resource', 'create', '--future', '--force', `target-${assetName}`, 'ocf:heartbeat:iSCSITarget',
+                'implementation="lio-t"', 'portals=":::3260"', `iqn="${basename}:${assetName}"`
+              ];
+
+              if (this.options.iscsi.shareStrategyPcs.auth.enabled) {
+                createTargetTerms.push(`incoming_username="${this.options.iscsi.shareStrategyPcs.auth.incoming_username}"`);
+                createTargetTerms.push(`incoming_password="${this.options.iscsi.shareStrategyPcs.auth.incoming_password}"`);
+              }
+
+              await GeneralUtils.retry(
+                3,
+                2000,
+                async () => {
+                  await this.pcsCommand(createTargetTerms.concat(extraTerms));
+                },
+                {
+                  retryCondition: (err) => {
+                    if (err.stdout && err.stdout.includes("Timed Out")) {
+                      return true;
+                    }
+                    return false;
+                  },
+                }
+              );
+
+              let createLunTerms = [
+                'resource', 'create', '--future', `lun-${assetName}`, 'ocf:heartbeat:iSCSILogicalUnit',
+                'implementation="lio-t"', `target_iqn="${basename}:${assetName}"`, 'lun="0"',
+                `path="/dev/${extentDiskName}"`
+              ];
+
+              await GeneralUtils.retry(
+                3,
+                2000,
+                async () => {
+                  await this.pcsCommand(createLunTerms.concat(extraTerms));
+                },
+                {
+                  retryCondition: (err) => {
+                    if (err.stdout && err.stdout.includes("Timed Out")) {
+                      return true;
+                    }
+                    return false;
+                  },
+                }
+              );
+  
+              break;
+
           default:
-            break;
+            throw new GrpcError(
+              grpc.status.FAILED_PRECONDITION,
+              `invalid configuration: unknown shareStrategy ${this.options.iscsi.shareStrategy}`
+            );
         }
 
         // iqn = target
@@ -689,8 +754,54 @@ delete ${assetName}
             );
 
             break;
-          default:
+          case "pcs":
+            let deleteLunText = [
+              'resource', 'delete', `lun-${assetName}`
+            ];
+
+            await GeneralUtils.retry(
+              3,
+              2000,
+              async () => {
+                await this.pcsCommand(deleteLunText);
+              },
+              {
+                retryCondition: (err) => {
+                  if (err.stdout && err.stdout.includes("Timed Out")) {
+                    return true;
+                  }
+                  return false;
+                },
+              }
+            );
+
+            let deleteTargetText = [
+              'resource', 'delete', `target-${assetName}`
+            ];
+
+            await GeneralUtils.retry(
+              3,
+              2000,
+              async () => {
+                await this.pcsCommand(deleteTargetText);
+              },
+              {
+                retryCondition: (err) => {
+                  if (err.stdout && err.stdout.includes("Timed Out")) {
+                    return true;
+                  }
+                  return false;
+                },
+              }
+            );
+
             break;
+
+          default:
+            throw new GrpcError(
+              grpc.status.FAILED_PRECONDITION,
+              `invalid configuration: unknown shareStrategy ${this.options.iscsi.shareStrategy}`
+            );
         }
         break;
       }
@@ -840,6 +951,9 @@ save_config filename=${this.options.nvmeof.shareStrategySpdkCli.configPath}
           case "targetCli":
             // nothing required, just need to rescan on the node
             break;
+          case "pcs":
+            // nothing required, just need to rescan on the node
+            break;
           default:
             break;
         }
@@ -848,6 +962,66 @@ save_config filename=${this.options.nvmeof.shareStrategySpdkCli.configPath}
       default:
         break;
     }
+  }
+
+  async pcsCommand(commandTerms) {
+    const execClient = this.getExecClient();
+    const driver = this;
+
+    let command = "sh";
+    let args = ["-c"];
+
+    let cliArgs = ["pcs"];
+    if (
+      _.get(this.options, "iscsi.shareStrategyPcs.sudoEnabled", false)
+    ) {
+      cliArgs.unshift("sudo");
+    }
+
+    let cliCommand = [];
+    cliCommand.push(cliArgs.join(" "));
+    cliCommand.push(commandTerms.join(" "));
+    args.push("'" + cliCommand.join(" ") + "'");
+
+    let logCommandTmp = command + " " + args.join(" ");
+    let logCommand = "";
+
+    logCommandTmp.split(" ").forEach((term) => {
+      logCommand += " ";
+      
+      if (term.startsWith("incoming_password=")) {
+        logCommand += "incoming_password=<redacted>";
+      } else {
+        logCommand += term;
+      }
+    });
+
+    driver.ctx.logger.verbose("pcs command:" + logCommand);
+
+    let options = {
+      pty: true,
+    };
+
+    return driver.pcsMutex.runExclusive(async () => {
+      let response = await execClient.exec(
+        execClient.buildCommand(command, args),
+        options
+      );
+      driver.ctx.logger.verbose(
+        "pcs response: " + JSON.stringify(response)
+      );
+          
+      // Handle idempotence for create commands
+      if (response.code == 1 && response.stdout.includes("already exists")) {
+        driver.ctx.logger.verbose("pcs resource already exists, ignoring error (setting response.code=0)");
+        response.code = 0;
+      }
+
+      if (response.code != 0) {
+        throw response;
+      }
+      return response;
+    });
   }
 
   async targetCliCommand(data) {
@@ -897,17 +1071,20 @@ save_config filename=${this.options.nvmeof.shareStrategySpdkCli.configPath}
     let options = {
       pty: true,
     };
-    let response = await execClient.exec(
-      execClient.buildCommand(command, args),
-      options
-    );
-    driver.ctx.logger.verbose(
-      "TargetCLI response: " + JSON.stringify(response)
-    );
-    if (response.code != 0) {
-      throw response;
-    }
-    return response;
+
+    return driver.targetCliMutex.runExclusive(async () => {
+      let response = await execClient.exec(
+        execClient.buildCommand(command, args),
+        options
+      );
+      driver.ctx.logger.verbose(
+        "TargetCLI response: " + JSON.stringify(response)
+      );
+      if (response.code != 0) {
+        throw response;
+      }
+      return response;
+    });
   }
 
   async nvmetCliCommand(data) {
@@ -985,15 +1162,20 @@ save_config filename=${this.options.nvmeof.shareStrategySpdkCli.configPath}
     let options = {
       pty: true,
     };
-    let response = await execClient.exec(
-      execClient.buildCommand(command, args),
-      options
-    );
-    driver.ctx.logger.verbose("nvmetCLI response: " + JSON.stringify(response));
-    if (response.code != 0) {
-      throw response;
-    }
-    return response;
+
+    return driver.nvmetCliMutex.runExclusive(async () => {
+      let response = await execClient.exec(
+        execClient.buildCommand(command, args),
+        options
+      );
+      driver.ctx.logger.verbose(
+        "nvmetCLI response: " + JSON.stringify(response)
+      );
+      if (response.code != 0) {
+        throw response;
+      }
+      return response;
+    });
   }
 
   async spdkCliCommand(data) {
@@ -1044,15 +1226,20 @@ save_config filename=${this.options.nvmeof.shareStrategySpdkCli.configPath}
     let options = {
       pty: true,
     };
-    let response = await execClient.exec(
-      execClient.buildCommand(command, args),
-      options
-    );
-    driver.ctx.logger.verbose("spdkCLI response: " + JSON.stringify(response));
-    if (response.code != 0) {
-      throw response;
-    }
-    return response;
+
+    return driver.spdkCliMutex.runExclusive(async () => {
+      let response = await execClient.exec(
+        execClient.buildCommand(command, args),
+        options
+      );
+      driver.ctx.logger.verbose(
+        "spdkCLI response: " + JSON.stringify(response)
+      );
+      if (response.code != 0) {
+        throw response;
+      }
+      return response;
+    });
   }
 }
 

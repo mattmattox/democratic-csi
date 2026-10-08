@@ -1,0 +1,8 @@
+driver: containerd-oci-ephemeral-inline
+containerd:
+  #address: /run/containerd/containerd.sock
+  #windowsAddress: \\\\.\\pipe\\containerd-containerd
+
+  # use k8s.io to use the k8s ns
+  #namespace: default
+  #creds encryption key

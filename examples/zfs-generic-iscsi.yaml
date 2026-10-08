@@ -27,6 +27,8 @@ zfs:
   #  "org.freenas:description": "{{ parameters.[csi.storage.k8s.io/pvc/namespace] }}/{{ parameters.[csi.storage.k8s.io/pvc/name] }}"
   #  "org.freenas:test": "{{ parameters.foo }}"
   #  "org.freenas:test2": "some value"
+  # snapshotProperties:
+  #  "org.freenas:key": "value"
 
   datasetParentName: tank/k8s/test
   # do NOT make datasetParentName and detachedSnapshotsDatasetParentName overlap
@@ -44,6 +46,7 @@ zfs:
 
 iscsi:
   shareStrategy: "targetCli"
+  #shareStrategy: "pcs"
 
   # https://kifarunix.com/how-to-install-and-configure-iscsi-storage-server-on-ubuntu-18-04/
   # https://kifarunix.com/how-install-and-configure-iscsi-storage-server-on-centos-7/
@@ -75,6 +78,17 @@ iscsi:
       attributes:
         # set to 1 to enable Thin Provisioning Unmap
         emulate_tpu: 0
+
+  shareStrategyPcs:
+    #sudoEnabled: true
+    pcs_group: "group-nas"
+    basename: "iqn.2003-01.org.linux-iscsi.ubuntu-19.x8664"
+    auth:
+      enabled: 0
+      # CHAP – incoming only, mutual not supported by the Pacemaker resource agent
+      incoming_username: "foo"
+      incoming_password: "bar"
+
   targetPortal: "server[:port]"
   # for multipath
   targetPortals: [] # [ "server[:port]", "server[:port]", ... ]

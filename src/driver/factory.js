@@ -14,6 +14,12 @@ const { ControllerSmbClientDriver } = require("./controller-smb-client");
 const { ControllerLustreClientDriver } = require("./controller-lustre-client");
 const { ControllerObjectiveFSDriver } = require("./controller-objectivefs");
 const { ControllerSynologyDriver } = require("./controller-synology");
+const {
+  EphemeralInlineContainerDOciDriver,
+} = require("./ephemeral-inline-containerd-oci");
+const {
+  EphemeralInlineVHDDriver,
+} = require("./ephemeral-inline-vhd");
 const { NodeManualDriver } = require("./node-manual");
 
 function factory(ctx, options) {
@@ -21,13 +27,20 @@ function factory(ctx, options) {
     case "freenas-nfs":
     case "freenas-smb":
     case "freenas-iscsi":
+    case "freenas-nvmeof":
     case "truenas-nfs":
     case "truenas-smb":
     case "truenas-iscsi":
+    case "truenas-nvmeof":
       return new FreeNASSshDriver(ctx, options);
-    case "freenas-api-iscsi":
     case "freenas-api-nfs":
     case "freenas-api-smb":
+    case "freenas-api-iscsi":
+    case "freenas-api-nvmeof":
+    case "truenas-api-nfs":
+    case "truenas-api-smb":
+    case "truenas-api-iscsi":
+    case "truenas-api-nvmeof":
       return new FreeNASApiDriver(ctx, options);
     case "synology-nfs":
     case "synology-smb":
@@ -53,6 +66,10 @@ function factory(ctx, options) {
       return new ControllerLustreClientDriver(ctx, options);
     case "objectivefs":
       return new ControllerObjectiveFSDriver(ctx, options);
+    case "containerd-oci-ephemeral-inline":
+      return new EphemeralInlineContainerDOciDriver(ctx, options);
+    case "vhd-ephemeral-inline":
+      return new EphemeralInlineVHDDriver(ctx, options);
     case "node-manual":
       return new NodeManualDriver(ctx, options);
     default:

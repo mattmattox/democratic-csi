@@ -1,6 +1,8 @@
-
+const _ = require("lodash");
+const semver = require("semver");
 const { sleep, stringify } = require("../../../utils/general");
 const { Zetabyte } = require("../../../utils/zfs");
+const { Registry } = require("../../../utils/registry");
 
 // used for in-memory cache of the version info
 const FREENAS_SYSTEM_VERSION_CACHE_KEY = "freenas:system_version";
@@ -11,6 +13,7 @@ class Api {
     this.client = client;
     this.cache = cache;
     this.options = options;
+    this.registry = new Registry();
   }
 
   async getHttpClient() {
@@ -22,7 +25,7 @@ class Api {
    * @returns
    */
   async getZetabyte() {
-    return this.ctx.registry.get(`${__REGISTRY_NS__}:zb`, () => {
+    return this.registry.get(`${__REGISTRY_NS__}:zb`, () => {
       return new Zetabyte({
         executor: {
           spawn: function () {
@@ -64,7 +67,7 @@ class Api {
       // crude stoppage attempt
       let response = await httpClient.get(endpoint, queryParams);
       if (lastReponse) {
-        if (JSON.stringify(lastReponse) == JSON.stringify(response)) {
+        if (JSON.stringify(lastReponse.body) == JSON.stringify(response.body)) {
           break;
         }
       }
@@ -110,60 +113,26 @@ class Api {
   }
 
   async getApiVersion() {
-    const systemVersion = await this.getSystemVersion();
-
-    if (systemVersion.v2) {
-      if ((await this.getSystemVersionMajorMinor()) == 11.2) {
-        return 1;
-      }
-      return 2;
-    }
-
-    if (systemVersion.v1) {
-      return 1;
-    }
-
     return 2;
   }
 
   async getIsFreeNAS() {
-    const systemVersion = await this.getSystemVersion();
-    let version;
-
-    if (systemVersion.v2) {
-      version = systemVersion.v2;
-    } else {
-      version = systemVersion.v1.fullversion;
-    }
-
-    if (version.toLowerCase().includes("freenas")) {
-      return true;
-    }
-
     return false;
   }
 
   async getIsTrueNAS() {
-    const systemVersion = await this.getSystemVersion();
-    let version;
-
-    if (systemVersion.v2) {
-      version = systemVersion.v2;
-    } else {
-      version = systemVersion.v1.fullversion;
-    }
-
-    if (version.toLowerCase().includes("truenas")) {
-      return true;
-    }
-
-    return false;
+    return true;
   }
 
   async getIsScale() {
     const systemVersion = await this.getSystemVersion();
+    const major = await this.getSystemVersionMajor();
 
-    if (systemVersion.v2 && systemVersion.v2.toLowerCase().includes("scale")) {
+    // starting with version 25 the version string no longer contains `-SCALE`
+    if (
+      systemVersion.v2 &&
+      (systemVersion.v2.toLowerCase().includes("scale") || Number(major) >= 20)
+    ) {
       return true;
     }
 
@@ -215,6 +184,12 @@ class Api {
     return majorMinor.split(".")[0];
   }
 
+  async getSystemVersionSemver() {
+    return semver.coerce(await this.getSystemVersionMajorMinor(), {
+      loose: true,
+    });
+  }
+
   async setVersionInfoCache(versionInfo) {
     await this.cache.set(FREENAS_SYSTEM_VERSION_CACHE_KEY, versionInfo, {
       ttl: 60 * 1000,
@@ -261,28 +236,6 @@ class Api {
       versionErrors.v2 = e.toString();
     }
 
-    httpClient.setApiVersion(1);
-    /**
-     * {"fullversion": "FreeNAS-9.3-STABLE-201503200528", "name": "FreeNAS", "version": "9.3"}
-     * {"fullversion": "FreeNAS-11.2-U5 (c129415c52)", "name": "FreeNAS", "version": ""}
-     */
-    try {
-      response = await httpClient.get(endpoint, null, { timeout: 5 * 1000 });
-      versionResponses.v1 = response;
-      if (response.statusCode == 200 && IsJsonString(response.body)) {
-        versionInfo.v1 = response.body;
-        await this.setVersionInfoCache(versionInfo);
-
-        // reset apiVersion
-        httpClient.setApiVersion(startApiVersion);
-
-        return versionInfo;
-      }
-    } catch (e) {
-      // if more info is needed use e.stack
-      versionErrors.v1 = e.toString();
-    }
-
     // throw error if cannot get v1 or v2 data
     // likely bad creds/url
     throw new Error(
@@ -304,7 +257,7 @@ class Api {
     let user_properties = {};
     for (const property in properties) {
       if (this.getIsUserProperty(property)) {
-        user_properties[property] = properties[property];
+        user_properties[property] = String(properties[property]);
       }
     }
 
@@ -325,7 +278,15 @@ class Api {
   getPropertiesKeyValueArray(properties) {
     let arr = [];
     for (const property in properties) {
-      arr.push({ key: property, value: properties[property] });
+      let value = properties[property];
+      if (
+        this.getIsUserProperty(property) &&
+        value != null &&
+        value !== undefined
+      ) {
+        value = String(value);
+      }
+      arr.push({ key: property, value });
     }
 
     return arr;
@@ -478,13 +439,13 @@ class Api {
    * @param {*} properties
    * @returns
    */
-  async DatasetGet(datasetName, properties) {
+  async DatasetGet(datasetName, properties, queryParams = {}) {
     const httpClient = await this.getHttpClient(false);
     let response;
     let endpoint;
 
     endpoint = `/pool/dataset/id/${encodeURIComponent(datasetName)}`;
-    response = await httpClient.get(endpoint);
+    response = await httpClient.get(endpoint, queryParams);
 
     if (response.statusCode == 200) {
       return this.normalizeProperties(response.body, properties);
@@ -497,36 +458,75 @@ class Api {
     throw new Error(JSON.stringify(response.body));
   }
 
+  /**
+   * This is meant to destroy all snapshots on the given dataset
+   *
+   * @param {*} datasetName
+   * @param {*} data
+   * @returns
+   */
   async DatasetDestroySnapshots(datasetName, data = {}) {
     const httpClient = await this.getHttpClient(false);
     let response;
     let endpoint;
 
-    data.name = datasetName;
+    const major = await this.getSystemVersionMajor();
+    if (Number(major) >= 25) {
+      try {
+        response = await this.DatasetGet(
+          datasetName,
+          ["id", "type", "name", "pool", "snapshots"],
+          {
+            "extra.snapshots": "true",
+            "extra.retrieve_children": "false",
+          }
+        );
 
-    endpoint = "/pool/dataset/destroy_snapshots";
-    response = await httpClient.post(endpoint, data);
+        for (const snapshot of _.get(response, "snapshots", [])) {
+          await this.SnapshotDelete(snapshot.name, {
+            defer: true,
+          });
+        }
+      } catch (err) {
+        if (err.toString().includes("dataset does not exist")) {
+          return;
+        }
+        throw err;
+      }
+    } else {
+      data.name = datasetName;
 
-    if (response.statusCode == 200) {
-      return response.body;
+      endpoint = "/pool/dataset/destroy_snapshots";
+      response = await httpClient.post(endpoint, data);
+
+      if (response.statusCode == 200) {
+        return response.body;
+      }
+
+      if (
+        response.statusCode == 422 &&
+        JSON.stringify(response.body).includes("already exists")
+      ) {
+        return;
+      }
+
+      throw new Error(JSON.stringify(response.body));
     }
-
-    if (
-      response.statusCode == 422 &&
-      JSON.stringify(response.body).includes("already exists")
-    ) {
-      return;
-    }
-
-    throw new Error(JSON.stringify(response.body));
   }
 
   async SnapshotSet(snapshotName, properties) {
     const httpClient = await this.getHttpClient(false);
+    const systemVersionSemver = await this.getSystemVersionSemver();
+
     let response;
     let endpoint;
 
-    endpoint = `/zfs/snapshot/id/${encodeURIComponent(snapshotName)}`;
+    if (semver.satisfies(systemVersionSemver, ">=25.10")) {
+      endpoint = `/pool/snapshot/id/${encodeURIComponent(snapshotName)}`;
+    } else {
+      endpoint = `/zfs/snapshot/id/${encodeURIComponent(snapshotName)}`;
+    }
+
     response = await httpClient.put(endpoint, {
       //...this.getSystemProperties(properties),
       user_properties_update: this.getPropertiesKeyValueArray(
@@ -551,10 +551,17 @@ class Api {
    */
   async SnapshotGet(snapshotName, properties) {
     const httpClient = await this.getHttpClient(false);
+    const systemVersionSemver = await this.getSystemVersionSemver();
+
     let response;
     let endpoint;
 
-    endpoint = `/zfs/snapshot/id/${encodeURIComponent(snapshotName)}`;
+    if (semver.satisfies(systemVersionSemver, ">=25.10")) {
+      endpoint = `/pool/snapshot/id/${encodeURIComponent(snapshotName)}`;
+    } else {
+      endpoint = `/zfs/snapshot/id/${encodeURIComponent(snapshotName)}`;
+    }
+
     response = await httpClient.get(endpoint);
 
     if (response.statusCode == 200) {
@@ -562,7 +569,7 @@ class Api {
     }
 
     if (response.statusCode == 404) {
-      throw new Error("dataset does not exist");
+      throw new Error("snapshot does not exist");
     }
 
     throw new Error(JSON.stringify(response.body));
@@ -571,6 +578,7 @@ class Api {
   async SnapshotCreate(snapshotName, data = {}) {
     const httpClient = await this.getHttpClient(false);
     const zb = await this.getZetabyte();
+    const systemVersionSemver = await this.getSystemVersionSemver();
 
     let response;
     let endpoint;
@@ -581,7 +589,12 @@ class Api {
     data.dataset = dataset;
     data.name = snapshot;
 
-    endpoint = "/zfs/snapshot";
+    if (semver.satisfies(systemVersionSemver, ">=25.10")) {
+      endpoint = "/pool/snapshot";
+    } else {
+      endpoint = "/zfs/snapshot";
+    }
+
     response = await httpClient.post(endpoint, data);
 
     if (response.statusCode == 200) {
@@ -601,11 +614,17 @@ class Api {
   async SnapshotDelete(snapshotName, data = {}) {
     const httpClient = await this.getHttpClient(false);
     const zb = await this.getZetabyte();
+    const systemVersionSemver = await this.getSystemVersionSemver();
 
     let response;
     let endpoint;
 
-    endpoint = `/zfs/snapshot/id/${encodeURIComponent(snapshotName)}`;
+    if (semver.satisfies(systemVersionSemver, ">=25.10")) {
+      endpoint = `/pool/snapshot/id/${encodeURIComponent(snapshotName)}`;
+    } else {
+      endpoint = `/zfs/snapshot/id/${encodeURIComponent(snapshotName)}`;
+    }
+
     response = await httpClient.delete(endpoint, data);
 
     if (response.statusCode == 200) {
@@ -626,9 +645,360 @@ class Api {
     throw new Error(JSON.stringify(response.body));
   }
 
+  async NvmetSubsysList(data = {}) {
+    const httpClient = await this.getHttpClient(false);
+    const zb = await this.getZetabyte();
+    const systemVersionSemver = await this.getSystemVersionSemver();
+
+    let response;
+    let endpoint;
+
+    if (semver.satisfies(systemVersionSemver, ">=25.10")) {
+      endpoint = "/nvmet/subsys";
+    } else {
+      throw new Error("nvmet is unavailable with TrueNAS versions <25.10");
+    }
+
+    response = await httpClient.get(endpoint, data);
+
+    if (response.statusCode == 200) {
+      return response.body;
+    }
+
+    throw new Error(JSON.stringify(response.body));
+  }
+
+  async NvmetSubsysCreate(subsysName, data = {}) {
+    const httpClient = await this.getHttpClient(false);
+    const zb = await this.getZetabyte();
+    const systemVersionSemver = await this.getSystemVersionSemver();
+
+    let response;
+    let endpoint;
+
+    data.name = subsysName;
+    data.allow_any_host = true;
+
+    if (semver.satisfies(systemVersionSemver, ">=25.10")) {
+      endpoint = "/nvmet/subsys";
+    } else {
+      throw new Error("nvmet is unavailable with TrueNAS versions <25.10");
+    }
+
+    response = await httpClient.post(endpoint, data);
+
+    if (response.statusCode == 200) {
+      return response.body;
+    }
+
+    if (
+      response.statusCode == 422 &&
+      JSON.stringify(response.body).includes("already exists")
+    ) {
+      return this.NvmetSubsysGetByName(subsysName);
+    }
+
+    throw new Error(JSON.stringify(response.body));
+  }
+
+  async NvmetSubsysGetByName(subsysName, data = {}) {
+    const httpClient = await this.getHttpClient(false);
+    const zb = await this.getZetabyte();
+    const systemVersionSemver = await this.getSystemVersionSemver();
+
+    let response;
+    let endpoint;
+
+    data.name = subsysName;
+
+    if (semver.satisfies(systemVersionSemver, ">=25.10")) {
+      endpoint = "/nvmet/subsys";
+    } else {
+      throw new Error("nvmet is unavailable with TrueNAS versions <25.10");
+    }
+
+    response = await httpClient.get(endpoint, data);
+
+    if (response.statusCode == 200) {
+      for (const subsys of response.body) {
+        if (subsys.name == subsysName) {
+          return subsys;
+        }
+      }
+    }
+
+    throw new Error(JSON.stringify(response.body));
+  }
+
+  async NvmetSubsysGetById(id, data = {}) {
+    const httpClient = await this.getHttpClient(false);
+    const zb = await this.getZetabyte();
+    const systemVersionSemver = await this.getSystemVersionSemver();
+
+    let response;
+    let endpoint;
+
+    if (semver.satisfies(systemVersionSemver, ">=25.10")) {
+      endpoint = `/nvmet/subsys/id/${id}`;
+    } else {
+      throw new Error("nvmet is unavailable with TrueNAS versions <25.10");
+    }
+
+    response = await httpClient.get(endpoint, data);
+
+    if (response.statusCode == 200) {
+      return response.body;
+    }
+
+    throw new Error(JSON.stringify(response.body));
+  }
+
+  async NvmetSubsysDeleteById(id, data = {}) {
+    const httpClient = await this.getHttpClient(false);
+    const zb = await this.getZetabyte();
+    const systemVersionSemver = await this.getSystemVersionSemver();
+
+    let response;
+    let endpoint;
+
+    if (semver.satisfies(systemVersionSemver, ">=25.10")) {
+      endpoint = `/nvmet/subsys/id/${id}`;
+    } else {
+      throw new Error("nvmet is unavailable with TrueNAS versions <25.10");
+    }
+
+    response = await httpClient.delete(endpoint, data);
+
+    if (response.statusCode == 200) {
+      return;
+    }
+
+    if (
+      response.statusCode == 422 &&
+      JSON.stringify(response.body).includes("does not exist")
+    ) {
+      return;
+    }
+
+    throw new Error(JSON.stringify(response.body));
+  }
+
+  async NvmetPortList(data = {}) {
+    const httpClient = await this.getHttpClient(false);
+    const zb = await this.getZetabyte();
+    const systemVersionSemver = await this.getSystemVersionSemver();
+
+    let response;
+    let endpoint;
+
+    if (semver.satisfies(systemVersionSemver, ">=25.10")) {
+      endpoint = "/nvmet/port";
+    } else {
+      throw new Error("nvmet is unavailable with TrueNAS versions <25.10");
+    }
+
+    response = await httpClient.get(endpoint, data);
+
+    if (response.statusCode == 200) {
+      return response.body;
+    }
+
+    throw new Error(JSON.stringify(response.body));
+  }
+
+  async NvmetPortSubsysList(data = {}) {
+    const httpClient = await this.getHttpClient(false);
+    const zb = await this.getZetabyte();
+    const systemVersionSemver = await this.getSystemVersionSemver();
+
+    let response;
+    let endpoint;
+
+    if (semver.satisfies(systemVersionSemver, ">=25.10")) {
+      endpoint = "/nvmet/port_subsys";
+    } else {
+      throw new Error("nvmet is unavailable with TrueNAS versions <25.10");
+    }
+
+    response = await httpClient.get(endpoint, data);
+
+    if (response.statusCode == 200) {
+      return response.body;
+    }
+
+    throw new Error(JSON.stringify(response.body));
+  }
+
+  async NvmetPortSubsysCreate(port_id, subsys_id) {
+    const httpClient = await this.getHttpClient(false);
+    const zb = await this.getZetabyte();
+    const systemVersionSemver = await this.getSystemVersionSemver();
+
+    let response;
+    let endpoint;
+
+    let data = {
+      port_id,
+      subsys_id,
+    };
+
+    if (semver.satisfies(systemVersionSemver, ">=25.10")) {
+      endpoint = "/nvmet/port_subsys";
+    } else {
+      throw new Error("nvmet is unavailable with TrueNAS versions <25.10");
+    }
+
+    response = await httpClient.post(endpoint, data);
+
+    if (response.statusCode == 200) {
+      return response.body;
+    }
+
+    //already exists
+    if (
+      response.statusCode == 422 &&
+      JSON.stringify(response.body).includes("already exists")
+    ) {
+      response = await this.NvmetPortSubsysList({ port_id, subsys_id });
+      if (Array.isArray(response) && response.length == 1) {
+        return response[0];
+      }
+    }
+
+    throw new Error(JSON.stringify(response.body));
+  }
+
+  async NvmetNamespaceCreate(zvol, subsysId, data = {}) {
+    const httpClient = await this.getHttpClient(false);
+    const zb = await this.getZetabyte();
+    const systemVersionSemver = await this.getSystemVersionSemver();
+
+    let response;
+    let endpoint;
+
+    zvol = String(zvol);
+    if (zvol.startsWith("/dev/")) {
+      zvol = zvol.substring(5);
+    }
+
+    if (zvol.startsWith("/")) {
+      zvol = zvol.substring(1);
+    }
+
+    if (!zvol.startsWith("zvol/")) {
+      zvol = `zvol/${zvol}`;
+    }
+
+    data.device_type = "ZVOL";
+    data.device_path = zvol;
+    data.subsys_id = subsysId;
+
+    if (semver.satisfies(systemVersionSemver, ">=25.10")) {
+      endpoint = "/nvmet/namespace";
+    } else {
+      throw new Error("nvmet is unavailable with TrueNAS versions <25.10");
+    }
+
+    response = await httpClient.post(endpoint, data);
+
+    if (response.statusCode == 200) {
+      return response.body;
+    }
+
+    if (
+      response.statusCode == 422 &&
+      JSON.stringify(response.body).includes("already exists")
+    ) {
+      return this.NvmetSubsysGetByName(subsysName);
+    }
+
+    if (
+      response.statusCode == 422 &&
+      JSON.stringify(response.body).includes("already used by subsystem")
+    ) {
+      //This device_path already used by subsystem: csi-pvc-111-clustera
+      return this.NvmetNamespaceGetByDeivcePath(zvol);
+    }
+
+    throw new Error(JSON.stringify(response.body));
+  }
+
+  async NvmetNamespaceGetByDeivcePath(zvol) {
+    const httpClient = await this.getHttpClient(false);
+    const zb = await this.getZetabyte();
+    const systemVersionSemver = await this.getSystemVersionSemver();
+
+    let response;
+    let endpoint;
+
+    zvol = String(zvol);
+    if (zvol.startsWith("/dev/")) {
+      zvol = zvol.substring(5);
+    }
+
+    if (zvol.startsWith("/")) {
+      zvol = zvol.substring(1);
+    }
+
+    if (!zvol.startsWith("zvol/")) {
+      zvol = `zvol/${zvol}`;
+    }
+
+    if (semver.satisfies(systemVersionSemver, ">=25.10")) {
+      endpoint = "/nvmet/namespace";
+    } else {
+      throw new Error("nvmet is unavailable with TrueNAS versions <25.10");
+    }
+
+    let data = {
+      device_path: zvol,
+    };
+
+    response = await httpClient.get(endpoint, data);
+
+    if (response.statusCode == 200) {
+      if (Array.isArray(response.body) && response.body.length == 1) {
+        return response.body[0];
+      }
+    }
+
+    throw new Error(JSON.stringify(response.body));
+  }
+
+  async NvmetNamespaceDeleteById(id) {
+    const httpClient = await this.getHttpClient(false);
+    const zb = await this.getZetabyte();
+    const systemVersionSemver = await this.getSystemVersionSemver();
+
+    let response;
+    let endpoint;
+
+    if (semver.satisfies(systemVersionSemver, ">=25.10")) {
+      endpoint = `/nvmet/namespace/id/${id}`;
+    } else {
+      throw new Error("nvmet is unavailable with TrueNAS versions <25.10");
+    }
+
+    response = await httpClient.delete(endpoint);
+
+    if (response.statusCode == 200) {
+      return;
+    }
+
+    if (
+      response.statusCode == 422 &&
+      JSON.stringify(response.body).includes("does not exist")
+    ) {
+      return;
+    }
+
+    throw new Error(JSON.stringify(response.body));
+  }
+
   async CloneCreate(snapshotName, datasetName, data = {}) {
     const httpClient = await this.getHttpClient(false);
     const zb = await this.getZetabyte();
+    const systemVersionSemver = await this.getSystemVersionSemver();
 
     let response;
     let endpoint;
@@ -636,7 +1006,12 @@ class Api {
     data.snapshot = snapshotName;
     data.dataset_dst = datasetName;
 
-    endpoint = "/zfs/snapshot/clone";
+    if (semver.satisfies(systemVersionSemver, ">=25.10")) {
+      endpoint = "/pool/snapshot/clone";
+    } else {
+      endpoint = "/zfs/snapshot/clone";
+    }
+
     response = await httpClient.post(endpoint, data);
 
     if (response.statusCode == 200) {

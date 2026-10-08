@@ -1,0 +1,30 @@
+kind: Pod
+apiVersion: v1
+metadata:
+  name: some-vhd-pod-windows
+spec:
+  nodeSelector:
+    kubernetes.io/os: windows
+  containers:
+    - name: hello
+      image: mcr.microsoft.com/windows/servercore:ltsc2022
+      command:
+        - powershell.exe
+        - -command
+        - while ($true) { Start-Sleep -Seconds 1 }
+      resources:
+        requests:
+          memory: "1Gi"
+          cpu: "500m"
+        limits:
+          memory: "1Gi"
+          cpu: "500m"
+      volumeMounts:
+        - name: vhd
+          mountPath: /mnt/vhd
+  volumes:
+    - name: vhd
+      csi:
+        driver: org.democratic-csi.vhd-ephemeral-inline
+        volumeAttributes:
+          vhd.parentPath: "C:\\some\\host\\path\\to\\SampleDisk.vhdx"

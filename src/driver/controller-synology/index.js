@@ -127,7 +127,7 @@ class ControllerSynologyDriver extends CsiBaseDriver {
       case "synology-iscsi":
         return "volume";
       default:
-        throw new Error("unknown driver: " + this.ctx.args.driver);
+        throw new Error("unknown driver: " + this.options.driver);
     }
   }
 
@@ -140,7 +140,7 @@ class ControllerSynologyDriver extends CsiBaseDriver {
       case "synology-iscsi":
         return "iscsi";
       default:
-        throw new Error("unknown driver: " + this.ctx.args.driver);
+        throw new Error("unknown driver: " + this.options.driver);
     }
   }
 
@@ -163,7 +163,7 @@ class ControllerSynologyDriver extends CsiBaseDriver {
   parseParameterYamlData(data, fieldHint = "") {
     try {
       return yaml.load(data);
-    } catch {
+    } catch (err) {
       if (err instanceof yaml.YAMLException) {
         throw new GrpcError(
           grpc.status.INVALID_ARGUMENT,

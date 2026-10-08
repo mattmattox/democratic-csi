@@ -1,10 +1,10 @@
-driver: freenas-api-iscsi
+driver: freenas-api-nvmeof
 
 httpConnection:
   protocol: http
   host: ${TRUENAS_HOST}
   port: 80
-  #apiKey: 
+  #apiKey:
   username: ${TRUENAS_USERNAME}
   password: ${TRUENAS_PASSWORD}
 
@@ -17,18 +17,12 @@ zfs:
   zvolEnableReservation: false
   zvolBlocksize:
 
-iscsi:
-  targetPortal: ${TRUENAS_HOST}
-  interface: ""
+nvmeof:
+  transports:
+    - tcp://${TRUENAS_HOST}:4420
   namePrefix: "csi-ci-${CI_BUILD_KEY}-"
-  nameSuffix: ""
-  targetGroups:
-    - targetGroupPortalGroup: 1
-      targetGroupInitiatorGroup: 1
-      targetGroupAuthType: None
-      targetGroupAuthGroup:
-  # 0-100 (0 == ignore)
-  extentAvailThreshold: 0
+  ports:
+    - 1
 
 # https://github.com/SCST-project/scst/blob/master/scst/src/dev_handlers/scst_vdisk.c#L203
 _private:
